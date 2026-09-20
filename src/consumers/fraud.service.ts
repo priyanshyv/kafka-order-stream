@@ -5,10 +5,10 @@
  * fromBeginning: true and a brand-new groupId, and processes every order that
  * was ever placed - including the ones from before this file existed.
  *
- * In the current system, shipping a new consumer means backfilling from
- * Postgres with a hand-written script and hoping your query matches what the
- * live path does. Here the history IS the input, so the backfill and the live
- * path run identical code.
+ * With a queue, shipping a new consumer means backfilling from the database
+ * with a hand-written script and hoping your query matches what the live path
+ * does. Here the history IS the input, so the backfill and the live path run
+ * identical code.
  *
  * Note the groupId ends in a version. Bump it (`-v2`, `-v3`) and you replay
  * the entire history again from scratch - that is how you re-run a consumer

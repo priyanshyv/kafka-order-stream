@@ -1,14 +1,16 @@
 /**
  * PHASE 3 - ordering, partition keys, and idempotency.
  *
- * Your doc's sharpest finding: "Inventory is two queue hops from checkout" -
- * the decrement only runs after RabbitMQ delivers ORDER_PLACED *and* Zoho
- * accepts the sales order, and it's fired with `void`, so if it throws nothing
- * retries and the item stays sellable to someone else.
+ * Inventory is the side effect that actually costs money when it goes wrong,
+ * which makes it the honest place to argue for a stream.
+ *
+ * A common queue-based shape: checkout publishes, a worker picks it up, calls
+ * an external ERP, and only then fires the stock decrement - often as a
+ * fire-and-forget call, so if it throws nothing retries and the item stays
+ * sellable to someone else.
  *
  * Here it's one hop, it commits an offset, and if it crashes it resumes from
- * the exact message it died on. That is the whole argument for a stream,
- * demonstrated on the one side effect that actually costs you money.
+ * the exact message it died on.
  */
 import { runConsumer } from '../lib/kafka.js';
 import { TOPICS } from '../config.js';
@@ -60,7 +62,7 @@ await runConsumer('inventory-service', {
       }
       lastSeq.set(event.orderId, Math.max(prev, event.sequence));
 
-      if (event.to === 'CANCELLED') log.info(`${event.orderId} cancelled - releasing procurement`);
+      if (event.to === 'CANCELLED') log.info(`${event.orderId} cancelled - releasing stock`);
     }
 
     processedEvents.add(event.meta.eventId);

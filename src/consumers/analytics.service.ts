@@ -1,7 +1,8 @@
 /**
  * PHASE 2 - a second, completely independent group.
  *
- * Replaces: the SQS META_EVENT / FIREBASE_EVENT pushes.
+ * Stands in for the analytics pushes most systems send to Meta / Firebase /
+ * their warehouse - each of which needs its own queue in a queue-based design.
  * Run this alongside email-service and watch BOTH receive every message. That
  * is the thing a queue cannot do: with one RabbitMQ queue, whoever reads a
  * message takes it away from everyone else.

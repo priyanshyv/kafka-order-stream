@@ -1,21 +1,55 @@
-# flexipill-stream
+# kafka-order-stream
 
-Learning message streams by rebuilding **your** order flow — the one in the
-"Order Placement Wiring" doc — on Kafka instead of `await` chains, RabbitMQ,
-SQS, and `void`.
+Learning Kafka by rebuilding a realistic e-commerce order flow — checkout →
+payment → fulfilment — as a message stream instead of an `await` chain plus a
+pile of queues.
 
-Nothing here is a toy topic. Every file maps to something real:
+Not a toy `hello-world` topic. It's the flow every commerce backend actually
+has, with the failure modes that flow actually has, so each Kafka concept shows
+up as the answer to a problem you've already felt.
 
-| This repo | Your system |
+## The problem it's modelled on
+
+A typical checkout does a sequence of local writes, then fans out to everything
+downstream — and that fan-out is usually written by hand inside the checkout
+path:
+
+```ts
+async function fanOutAfterOrderPlaced(order) {
+  await assignWarehouse(order);
+  await rabbit.publish('ORDER_PLACED', order);   // inventory, eventually
+  await externalErp.createSalesOrder(order);     // slow, flaky, third-party
+  void  sendConfirmationEmail(order);            // fire and forget
+  void  pushAnalyticsEvent(order);               // fire and forget
+}
+```
+
+Three things are wrong with this shape, and all three are common:
+
+1. **Adding a consumer means editing checkout** — the riskiest file you own.
+2. **`void` means no retries.** If the inventory decrement throws, nothing
+   retries it and nobody finds out.
+3. **One `try/catch` around the lot** means a failure halfway through returns a
+   clean `200` to the customer with half the downstream work silently skipped.
+
+This repo rebuilds that fan-out as **one keyed append to a log**, and then walks
+through what you get for free once you do.
+
+## What's here
+
+| File | Role |
 |---|---|
-| `POST /orders/initiateOrder` | `createOrderForMethod` — the nine-step write sequence |
-| topic `orders` | what `postOrderCreationJobs()` fans out to |
-| topic `order-status` | the `order_status_log` table, as an actual log |
-| `email.service.ts` | `sendOrderDetailsEmail` off `processPostOrderCreationJobs` |
-| `inventory.service.ts` | `processItemProcurementForOrderV2` — the `void` one |
-| `zoho.service.ts` | `createZohoSalesOrderForOrderV2` + a real DLQ |
-| `analytics.service.ts` | the SQS `META_EVENT` / `FIREBASE_EVENT` pushes |
-| `fraud.service.ts` | the consumer you can't build today without a backfill script |
+| `src/producer/api.ts` | checkout — the only producer |
+| `src/producer/publisher.ts` | the keyed `publish()`, and a deliberately broken unkeyed one |
+| `src/lib/kafka.ts` | shared consumer harness: groups, retries, DLQ |
+| `src/consumers/email.service.ts` | simplest consumer |
+| `src/consumers/analytics.service.ts` | second independent group — run two copies |
+| `src/consumers/inventory.service.ts` | ordering + idempotency, on the side effect that costs money |
+| `src/consumers/erp.service.ts` | a flaky third-party API + dead-letter topic |
+| `src/consumers/fraud.service.ts` | joins late, replays all history |
+| `src/tools/offsets.ts` | committed vs end vs lag, per group per partition |
+
+Three topics: `orders` (3 partitions), `order-status` (3), `orders-dlq` (1).
 
 ---
 
@@ -24,19 +58,20 @@ Nothing here is a toy topic. Every file maps to something real:
 ```bash
 docker compose up -d      # Redpanda (Kafka-compatible) + a web console
 npm install
-npm run topics            # creates orders(3p), order-status(3p), orders-dlq(1p)
+npm run topics
 ```
 
 Web console at **http://localhost:8080** — browse topics, partitions, individual
-messages, and consumer group lag. Keep it open; it's your microscope.
+messages, and consumer group lag. Keep it open; it makes the abstract parts
+visible.
 
-Each service is its own terminal. That's deliberate — you need to kill them
-independently.
+Each service runs in its own terminal. That's deliberate — the whole point is
+killing one without touching the others.
 
 ```
 Terminal 1:  npm run api          Terminal 4:  npm run analytics
-Terminal 2:  npm run email        Terminal 5:  npm run zoho
-Terminal 3:  npm run inventory    Terminal 6:  npm run offsets    (run on demand)
+Terminal 2:  npm run email        Terminal 5:  npm run erp
+Terminal 3:  npm run inventory    Terminal 6:  npm run offsets   (on demand)
 ```
 
 ---
@@ -44,149 +79,220 @@ Terminal 3:  npm run inventory    Terminal 6:  npm run offsets    (run on demand
 ## Phase 1 — produce and consume
 
 ```bash
-npm run api          # terminal 1
-npm run email        # terminal 2
-npm run seed -- 5    # terminal 3
+npm run api
+npm run email
+npm run seed -- 5
 ```
 
-**Watch:** `email-service` prints `p1@0`, `p0@2`, `p2@1` … That's
-partition@offset. Every message has a permanent address in the log.
+```
+[order-service]  ORD-1001 placed (COD, Rs.240) -> partition 1 offset 1
+[email-service]  p1@1 -> confirmation email to user-7 for ORD-1001 (Rs.240)
+```
 
-**Notice what didn't happen:** `api.ts` has no idea `email.service.ts` exists.
-Compare to `postOrderCreationJobs()`, which names every downstream by hand and
-must be edited to add one.
+`p1@1` = partition 1, offset 1 — a permanent address in an append-only file.
+Offsets never reset and never get reused.
+
+**Now grep `api.ts` for the word "email".** It isn't there. The producer states
+that something happened; it has no idea who cares.
 
 ---
 
-## Phase 2 — the "why not a queue" moment
+## Phase 2 — consumer groups
 
-Start `npm run analytics` too. Seed again.
+The single most important field in the repo is `groupId`, and it does two jobs:
+it names the bookmark, and it declares a team.
 
-**Both services get every message.** With one RabbitMQ queue, whichever worker
-grabs a message takes it away from everyone else — so today you need a separate
-queue per consumer, and the producer must know to publish to each.
-
-Now the second half, and this is the part people misunderstand:
+**Different group names → everyone gets everything:**
 
 ```bash
-npm run analytics     # terminal 4
-npm run analytics     # terminal 5 — a SECOND copy, same file
+npm run email        # groupId: 'email-service'
+npm run analytics    # groupId: 'analytics-service'
+npm run seed -- 3
+```
+
+Both print the same offsets. Nothing was copied — the log is read-only, and
+each group has its own bookmark row on the broker.
+
+**Same group name → the work splits:**
+
+```bash
+npm run analytics    # terminal A
+npm run analytics    # terminal B — same file, same groupId
 npm run seed -- 9
 ```
 
-Two processes, same `groupId` → Kafka splits the 3 partitions between them.
-Each message goes to **exactly one**. Same code, opposite behaviour — decided
-entirely by `groupId`. That one string is the whole broadcast-vs-load-balance
-switch.
+```
+COPY 1                        COPY 2
+ORD-1007 [p2 offset=5]         ORD-1008 [p1 offset=3]
+ORD-1009 [p0 offset=9]         ORD-1010 [p1 offset=4]
+ORD-1011 [p0 offset=10]
+```
 
-**Then kill terminal 3 (`inventory`), seed 10 more, and run `npm run offsets`.**
-Its lag grows. Nothing is lost. Restart it — it resumes at the exact message it
-died on and drains to zero. That's the durable log in one table.
+Kafka doesn't distribute *messages*, it distributes **partitions** — one owner
+each. That's how it gets load-balancing and ordering at the same time.
+
+Consequence: **partition count is your parallelism cap.** 3 partitions means a
+4th consumer in that group sits idle forever.
+
+**Then kill a consumer, seed more, and look:**
+
+```bash
+npm run offsets
+```
+
+```
+email-service
+  orders  p0  committed=11  end=15   <-- 4 behind
+  orders  p1  committed= 5  end= 5   (caught up)
+```
+
+Lag is just `end - committed`. Both numbers live on the broker, which is why
+you can measure a consumer that isn't running. Restart it and it resumes at the
+exact message it died on.
 
 ---
 
 ## Phase 3 — partition keys and ordering
 
-Kafka orders messages **within a partition**, not within a topic. Same key →
-same partition → guaranteed order. `publisher.ts` keys on `orderId`, which is
-why an order's `OrderPlaced → PaymentConfirmed → DISPATCHED` can never arrive
-scrambled.
+> **Kafka guarantees order within a partition. Not within a topic.**
 
-Break it on purpose:
+Since the key picks the partition, the working rule is: *same key → same
+partition → guaranteed order.*
+
+Keyed (`key: orderId`), one order's whole life:
+
+```
+ORD-1010 seq 1  null              -> ORDER_CREATED       [p1]
+ORD-1010 seq 2  ORDER_CREATED     -> PICKING_COMPLETED   [p1]
+ORD-1010 seq 3  PICKING_COMPLETED -> QC_COMPLETED        [p1]
+ORD-1010 seq 4  QC_COMPLETED      -> DISPATCHED          [p1]
+ORD-1010 seq 5  DISPATCHED        -> DELIVERED           [p1]
+```
+
+Same partition every time. Now break it on purpose:
 
 ```bash
 curl -X POST localhost:3000/lab/unkeyed
 ```
 
-Five transitions for one order, published with **no key**, so they scatter.
-`inventory-service` will shout:
-
-```
-OUT OF ORDER for ORD-UNKEYED-1007: got seq 3 (QC_COMPLETED) after seq 4.
-  partition=0. This is what an unkeyed producer buys you.
+```json
+{"orderId":"ORD-UNKEYED-1011","partitions":[0,1,2,0,1]}
 ```
 
-This is the single most common production bug in event systems, and you just
-caused it in one command.
+```
+seq 1 -> ORDER_CREATED      [p0]
+seq 2 -> PICKING_COMPLETED  [p1]
+seq 5 -> DELIVERED          [p1]     <-- !!
+OUT OF ORDER: got seq 3 (QC_COMPLETED) after seq 5.  partition=2
+OUT OF ORDER: got seq 4 (DISPATCHED)  after seq 5.  partition=0
+```
 
-**Ask yourself:** in your real system, what would the key be for
-`order_status_log`? What breaks if you key on `user_id` instead?
+Delivered before QC. Loyalty activated on an order whose shipment hasn't been
+booked. **No exception, no error log, monitoring stays green** — which is
+exactly why these bugs survive to production.
+
+Run it five times; you'll get a different scramble each time, and occasionally
+the right order by luck.
+
+### Four ways to lose ordering
+
+1. **No key** — events scatter across partitions.
+2. **Partition count changed** — `hash % 3` becomes `hash % 6` and *some* keys
+   relocate while most don't. Never repartition a keyed topic in production.
+3. **Producer retries without `idempotent: true`** — a resend lands after a
+   later message. It's one word, and it's off by default.
+4. **Concurrency in your own handler** — `void someAsync()` throws away the
+   guarantee just as thoroughly as a missing key. Kafka's promise ends at your
+   handler's door.
+
+### Choosing the key
+
+The key is both the boundary of your ordering guarantee and the unit of your
+parallelism, and those pull in opposite directions:
+
+| Key | Ordered within | Parallelism | Risk |
+|---|---|---|---|
+| `orderId` | one order | excellent | none really |
+| `userId` | a user's orders | fine | heavy users become hot keys |
+| `warehouseId` | one warehouse | poor — few values | one busy site jams a partition |
+| none | nothing | best | ordering gone |
+
+Ask what the narrowest entity is whose events must not be reordered, then check
+no single key is disproportionately hot.
 
 ---
 
 ## Phase 4 — replay
 
-The thing a queue **cannot** do.
+The thing a queue physically cannot do.
 
 ```bash
-npm run seed -- 20     # build up history first
-npm run fraud          # a brand new service, written after the fact
+npm run seed -- 20     # build history first
+npm run fraud          # a service written after the fact
 ```
 
-`fraud.service.ts` joins with `fromBeginning: true` and processes every order
-ever placed — including all the ones from before the file existed. It labels
-each one `HISTORICAL` or `live` by comparing the broker timestamp to now.
+`fraud.service.ts` joins with `fromBeginning: true` under a brand-new group and
+processes every order ever placed, labelling each `HISTORICAL` or `live`:
 
-Today, shipping a new consumer means writing a Postgres backfill script and
-praying your query matches what the live path does. Here the backfill *is* the
-live path.
+```
+#1 HISTORICAL (15s old) ORD-1001 user=user-1 lifetime=Rs.240
+#6 HISTORICAL (14s old) ORD-1006 user=user-2 lifetime=Rs.2050
+```
 
-Now re-run it with a new group id and watch the entire history replay again:
+With a queue, a new consumer means a hand-written database backfill that has to
+match the live path's logic. Here the backfill **is** the live path — identical
+code, different starting offset.
+
+Bump the group name to replay from scratch, e.g. after fixing a bug:
 
 ```bash
 GROUP_ID=fraud-detection-v2 npm run fraud
 ```
 
-That's how you re-run a consumer after fixing a bug in it. Or rewind one in
-place (stop it first — Kafka refuses to move offsets under a live member):
+Or rewind an existing group in place (stop it first — Kafka refuses to move
+offsets under a live member):
 
 ```bash
 npm run reset -- email-service
-npm run email       # re-sends every confirmation email from the start
+npm run email
 ```
 
 ---
 
-## Phase 5 — failure, retries, DLQ
+## Phase 5 — retries, DLQ, idempotency
 
 ```bash
-FAIL_RATE=0.5 npm run zoho
+FAIL_RATE=0.5 npm run erp
 npm run seed -- 10
 ```
 
-Half the "Zoho" calls throw. Watch the retry ladder, then the survivors:
-
 ```
-attempt 1/3 failed: Zoho API 503 - retrying
-attempt 2/3 failed: Zoho API 503 - retrying
-ORD-1006 -> Zoho sales order SO-1006 created on attempt 3
-giving up after 3 attempts -> orders-dlq: Zoho API 503 (attempt 3)
+attempt 1/3 failed: ERP API 503 - retrying
+attempt 2/3 failed: ERP API 503 - retrying
+ORD-1006 -> ERP sales order SO-1006 created on attempt 3
+giving up after 3 attempts -> orders-dlq: ERP API 503 (attempt 3)
 ```
 
 Read the graveyard, with full provenance:
 
 ```bash
 npm run dlq
-# OrderPlaced ORD-1001 killed by zoho-service: Zoho API 503 (was orders p1@0)
+# OrderPlaced ORD-1001 killed by erp-service: ERP API 503 (was orders p1@0)
 
 REPLAY=1 npm run dlq     # push them back onto the original topic
 ```
 
-**Compare to today.** Your doc: `postOrderCreationJobs()`'s body sits in one
-`try` whose `catch` only logs `POST_ORDER_CREATION_JOBS_ERROR`. A thrown
-warehouse lookup means the customer gets a clean 200, the order exists and is
-paid for, and the RabbitMQ message at the bottom of the function was never
-sent — rescued only by a cron.
+The failure never reached the customer, never blocked the messages behind it,
+and never vanished.
 
-Here that same failure: retried three times, parked with its original
-topic/partition/offset, replayable with one command, and it never blocked the
-messages behind it.
+**The tax:** the offset commits *after* your handler, so a crash mid-handler
+means you get the message again. That's **at-least-once** delivery — Kafka
+chose "maybe twice" over "maybe never", because you can defend against twice
+and you cannot recover from never.
 
-**The tax:** retries mean `handle()` runs more than once for the same message.
-That's at-least-once delivery, and it's why `inventory.service.ts` keeps a
-`processedEvents` set keyed on `meta.eventId`. Delete that set, set
-`FAIL_RATE=0.9`, and watch your stock double-decrement. Do it once — it's the
-lesson that sticks.
+Defending against it is idempotency, which is why `inventory.service.ts` keeps
+a `processedEvents` set keyed on `meta.eventId`. Delete that set, set
+`FAIL_RATE=0.9`, and watch stock double-decrement. Worth doing once.
 
 ---
 
@@ -197,7 +303,7 @@ npm run offsets
 ```
 
 ```
-TOPIC END OFFSETS (how much history exists)
+TOPIC END OFFSETS
   orders         p0=5  p1=1  p2=3
 
 CONSUMER GROUPS
@@ -206,35 +312,58 @@ CONSUMER GROUPS
     orders  p1  committed=0  end=1  <-- 1 behind
 ```
 
-Committed vs end vs lag, per group per partition. Almost every question you
-have while learning this ("did it get the message?", "why is it slow?", "did
-the rewind work?") is answered by this table.
+Almost every question you'll have while learning this — *did it get the
+message? why is it slow? did the rewind work?* — is answered by this table.
 
 ---
 
-## What this exercise is actually arguing
+## Queue or stream?
 
-Your doc ends with three soft spots: no transaction across the nine writes,
-`void` on side effects that matter, and a catch-all that turns a fan-out
-failure into a silent success — and correctly notes **none of them are fixed by
-adopting a message stream.**
+Streams are not a strict upgrade. The honest split:
 
-That's still true, and this repo doesn't pretend otherwise. Steps 1–7 here are
-just as unprotected as they are in production. What a stream changes is only
-step 8 onward: one keyed append replaces a RabbitMQ publish plus a Zoho HTTP
-call plus a `void`, and every consumer gets durability, retries, replay, and
-its own independent position for free.
+| | Queue (SQS / RabbitMQ) | Stream (Kafka) |
+|---|---|---|
+| after reading | message destroyed | message stays |
+| consumers per message | one | unlimited groups |
+| replay history | impossible | free |
+| parallelism cap | unlimited workers | = partition count |
+| retry one message | yes, in isolation | blocks the partition |
+| ordering | none | per key |
+| ops cost | low | real |
 
-Worth holding both ideas at once: `order_status_log` already gives you an
-append-only ordered event log you can **join in SQL** — which Kafka can't. The
-honest case for a stream is fan-out and replay, not "we need an event log."
-You already have one.
+> **Queue when the message is a *task* — "do this thing, once."**
+> **Stream when the message is a *fact* — "this happened."**
+
+"Send SMS to user 5" is a task: one worker, then it's done, and you want fifty
+workers. That belongs on a queue and should stay there. "Order 1001 was placed"
+is a fact: true forever, and five teams have an opinion about it.
+
+Most mature systems run both — a stream carries the facts, and queues fan tasks
+out to workers off those facts.
+
+Two things a stream does **not** fix, worth saying out loud:
+
+- **It won't give you a transaction.** If your checkout writes nine rows with no
+  transaction, it still does after you adopt Kafka.
+- **You may already have an event log.** An append-only `order_status_log` table
+  is ordered, queryable, and **joinable in SQL** — which Kafka is not.
+
+The honest case for a stream is narrower and stronger than the usual pitch:
+**fan-out without touching checkout, and replay for new consumers.**
+
+---
 
 ## Suggested order of attack
 
-1. Run Phase 1–2 exactly as written. Don't skip the kill-and-restart.
+1. Run Phases 1–2 as written. Don't skip the kill-and-restart.
 2. Break Phase 3 yourself before reading the explanation.
 3. In Phase 5, delete the idempotency set and watch it corrupt.
 4. Then write a **sixth** consumer with no help — a `loyalty-service` that
    activates membership on `DELIVERED` — and replay all history through it.
    If you can do that without re-reading this file, you've got it.
+
+## Stack
+
+TypeScript · [kafkajs](https://kafka.js.org/) · Redpanda (Kafka API-compatible,
+single binary, no Zookeeper) · Express. Everything speaks plain Kafka, so
+swapping in real Kafka changes nothing but a broker address.

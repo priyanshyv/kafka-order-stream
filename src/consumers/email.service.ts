@@ -1,10 +1,10 @@
 /**
  * PHASE 1 + 2 - the simplest consumer.
  *
- * Replaces: sendOrderDetailsEmail() inside processPostOrderCreationJobs().
- * In the real system this only runs because capture-event.middleware pushed a
- * CREATE_EVENT to SQS after the response object was written. Here it just
- * subscribes. Nobody had to know it exists.
+ * In a queue-based system, the confirmation email fires because something in
+ * the checkout path explicitly pushed a message for it - so adding an email
+ * means editing checkout. Here it just subscribes. Nobody had to know it
+ * exists, and the producer was never touched.
  */
 import { runConsumer } from '../lib/kafka.js';
 import { TOPICS } from '../config.js';

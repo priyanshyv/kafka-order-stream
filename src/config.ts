@@ -1,13 +1,13 @@
 export const BROKERS = (process.env.KAFKA_BROKERS ?? 'localhost:9092').split(',');
 
 /**
- * Three topics. Mirrors the real system:
+ * Three topics, mirroring how a typical order system is wired:
  *
- *  orders        - the order lifecycle. This is what `postOrderCreationJobs()`
- *                  fans out to today via RabbitMQ + SQS + `void`.
- *  order-status  - one message per status transition. This IS `order_status_log`.
- *                  Your doc already calls that table "effectively your event log" -
- *                  here it becomes a real one.
+ *  orders        - the order lifecycle. In a queue-based system this is the
+ *                  fan-out that checkout does by hand: a RabbitMQ publish, an
+ *                  SQS push, and a few fire-and-forget calls.
+ *  order-status  - one message per status transition. Most systems already have
+ *                  this as an `order_status_log` table; here it is a real log.
  *  orders-dlq    - poison messages that failed after retries (Phase 5).
  */
 export const TOPICS = {

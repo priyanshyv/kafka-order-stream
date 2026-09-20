@@ -7,10 +7,10 @@ const N = Number(process.argv[2] ?? 10);
 const BASE = process.env.API ?? 'http://localhost:3000';
 
 const CATALOG = [
-  { sku: 'MED-001', name: 'Metformin 500mg', unitPrice: 240 },
-  { sku: 'MED-002', name: 'Atorvastatin 10mg', unitPrice: 410 },
-  { sku: 'MED-003', name: 'Telmisartan 40mg', unitPrice: 330 },
-  { sku: 'MED-004', name: 'Levothyroxine 50mcg', unitPrice: 180 },
+  { sku: 'SKU-001', name: 'Wireless Mouse', unitPrice: 240 },
+  { sku: 'SKU-002', name: 'Mechanical Keyboard', unitPrice: 410 },
+  { sku: 'SKU-003', name: 'USB-C Hub', unitPrice: 330 },
+  { sku: 'SKU-004', name: 'Laptop Stand', unitPrice: 180 },
 ];
 
 for (let i = 0; i < N; i++) {
@@ -30,7 +30,7 @@ for (let i = 0; i < N; i++) {
   const json = (await res.json()) as { orderId: string; partition: number };
   console.log(`seeded ${json.orderId} (${body.paymentMethod}) -> partition ${json.partition}`);
 
-  // PG orders get their gateway callback; COD orders get collected later.
+  // Prepaid orders get their gateway callback; COD orders get collected later.
   if (body.paymentMethod === 'PG') {
     await fetch(`${BASE}/orders/${json.orderId}/callback`, { method: 'POST' });
   }

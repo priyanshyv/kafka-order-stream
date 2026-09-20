@@ -1,9 +1,9 @@
 /**
  * Event contracts.
  *
- * In the current system these "events" are implicit: a RabbitMQ ORDER_PLACED
- * payload, an SQS CREATE_EVENT body set by capture-event.middleware, a `void`
- * function call. Nothing types them and nothing versions them.
+ * In a queue-based system these "events" are implicit: a RabbitMQ payload, an
+ * SQS message body assembled in middleware, a fire-and-forget function call.
+ * Nothing types them and nothing versions them.
  *
  * Here they are the contract. Every message on `orders` is one of these.
  */
@@ -28,7 +28,7 @@ export interface OrderItem {
   unitPrice: number;
 }
 
-/** Step 2 of the write sequence: the anchor row exists. */
+/** The anchor row exists. Everything downstream hangs off this fact. */
 export interface OrderPlaced {
   type: 'OrderPlaced';
   meta: EventMeta;
@@ -42,10 +42,10 @@ export interface OrderPlaced {
 }
 
 /**
- * Money confirmed. The two doors from your doc converge here:
- *   COD -> at delivery, via logOrderPayment
- *   PG  -> at gateway callback, POST /orders/:pg/callback
- * Same event, different `via`.
+ * Money confirmed. Cash-on-delivery and prepaid reach this point through two
+ * completely different doors - collection at the door vs a gateway callback -
+ * but downstream consumers only care that it happened. Same event, different
+ * `via`. Collapsing two code paths into one fact is a big part of the win.
  */
 export interface PaymentConfirmed {
   type: 'PaymentConfirmed';
@@ -57,7 +57,7 @@ export interface PaymentConfirmed {
   merchantTransactionId?: string;
 }
 
-/** The warehouse actually assigned. Was an in-request await + `void` fan-out. */
+/** The warehouse actually assigned to fulfil the order. */
 export interface WarehouseAssigned {
   type: 'WarehouseAssigned';
   meta: EventMeta;
@@ -66,7 +66,7 @@ export interface WarehouseAssigned {
   promisedDeliveryDate: string;
 }
 
-/** One per transition. This is a row of order_status_log, as a message. */
+/** One per transition. A row of the status log, as a message. */
 export interface OrderStatusChanged {
   type: 'OrderStatusChanged';
   meta: EventMeta;

@@ -16,7 +16,7 @@ const app = express();
 app.use(express.json());
 
 /**
- * Stand-in for the `orders` / `order_payments` / `order_status_log` tables.
+ * Stand-in for the orders / payments / status-log tables.
  * The whole point of this project is that this map is NOT the source of truth
  * for anyone but this service - everyone else builds their own from the stream.
  */
@@ -31,7 +31,7 @@ interface OrderRow {
   sequence: number;
 }
 const orders = new Map<string, OrderRow>();
-/** The idempotency key from your doc: the findOne on user_cart_id. */
+/** The idempotency key: one cart can only ever become one order. */
 const cartToOrder = new Map<string, string>();
 
 let orderSeq = 1000;
@@ -39,20 +39,21 @@ let orderSeq = 1000;
 /**
  * POST /orders/initiateOrder
  *
- * This is createOrderForMethod. Same nine steps, same order, same lack of a
- * transaction - except step 8 (the fan-out) is now one keyed append to a log
- * instead of a RabbitMQ publish + a Zoho HTTP call + a `void`.
+ * A typical checkout: a sequence of local writes, then a fan-out to everything
+ * downstream. The difference here is the fan-out - one keyed append to a log,
+ * instead of a queue publish plus an external API call plus a few
+ * fire-and-forget side effects, all named by hand inside checkout.
  */
 app.post('/orders/initiateOrder', async (req, res) => {
   const {
     userId = 'user-1',
     cartId = `cart-${Date.now()}`,
     paymentMethod = 'COD',
-    items = [{ sku: 'MED-001', name: 'Metformin 500mg', qty: 1, unitPrice: 240 }],
+    items = [{ sku: 'SKU-001', name: 'Wireless Mouse', qty: 1, unitPrice: 240 }],
     walletDebit = 0,
   } = req.body as Partial<OrderRow> & { walletDebit?: number };
 
-  // Step 2's guard: the uniqueness check that makes the whole flow idempotent.
+  // The uniqueness check that makes the whole flow idempotent.
   const existing = cartToOrder.get(cartId);
   if (existing) {
     log.warn(`cart ${cartId} already ordered -> ${existing} (idempotent, no new event)`);
@@ -64,12 +65,12 @@ app.post('/orders/initiateOrder', async (req, res) => {
   const status: OrderStatus =
     paymentMethod === 'PG' ? 'ORDER_PAYMENT_PENDING' : 'ORDER_CREATED';
 
-  // Steps 1-7: local writes. Still not in a transaction - deliberately.
+  // Local writes first. You cannot announce a fact before it is true.
   const row: OrderRow = { orderId, userId, cartId, paymentMethod, items, total, status, sequence: 0 };
   orders.set(orderId, row);
   cartToOrder.set(cartId, orderId);
 
-  // Step 8: the fan-out. One append. No knowledge of who is listening.
+  // The fan-out. One append. No knowledge of who is listening.
   const placed: OrderEvent = {
     type: 'OrderPlaced',
     meta: makeMeta('order-service'),
@@ -83,7 +84,7 @@ app.post('/orders/initiateOrder', async (req, res) => {
   res.status(201).json({ orderId, status, partition: at.partition, offset: at.offset });
 });
 
-/** PG path: the gateway callback. POST /orders/:orderId/callback */
+/** Prepaid path: the payment gateway calls us back. */
 app.post('/orders/:orderId/callback', async (req, res) => {
   const row = orders.get(req.params.orderId);
   if (!row) return res.status(404).json({ error: 'no such order' });
@@ -101,7 +102,7 @@ app.post('/orders/:orderId/callback', async (req, res) => {
   res.json({ ok: true });
 });
 
-/** COD path: money lands at delivery. Same event, different door. */
+/** Cash-on-delivery path: money lands at the door. Same event, different door. */
 app.post('/orders/:orderId/collect', async (req, res) => {
   const row = orders.get(req.params.orderId);
   if (!row) return res.status(404).json({ error: 'no such order' });
@@ -119,9 +120,10 @@ app.post('/orders/:orderId/collect', async (req, res) => {
 
 /**
  * PATCH /orders/:orderId/status
- * This is updateStatus(). Every fulfilment side effect in the real system hangs
- * off this switch; here it just appends to `order-status` and the side effects
- * subscribe.
+ *
+ * In most systems every fulfilment side effect hangs off a big switch on the
+ * new status. Here it just appends to `order-status`, and the side effects
+ * subscribe to what they care about.
  */
 app.patch('/orders/:orderId/status', async (req, res) => {
   const row = orders.get(req.params.orderId);

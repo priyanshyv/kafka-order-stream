@@ -1,9 +1,9 @@
 {
-  "name": "flexipill-stream",
+  "name": "kafka-order-stream",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Learning Kafka by rebuilding the flexipill-core order flow as a message stream",
+  "description": "Learning Kafka by rebuilding the a typical e-commerce order flow order flow as a message stream",
   "scripts": {
     "topics": "NODE_NO_WARNINGS=1 tsx src/tools/topics.ts",
     "api": "NODE_NO_WARNINGS=1 tsx src/producer/api.ts",
@@ -11,7 +11,7 @@
     "inventory": "NODE_NO_WARNINGS=1 tsx src/consumers/inventory.service.ts",
     "analytics": "NODE_NO_WARNINGS=1 tsx src/consumers/analytics.service.ts",
     "fraud": "NODE_NO_WARNINGS=1 tsx src/consumers/fraud.service.ts",
-    "zoho": "NODE_NO_WARNINGS=1 tsx src/consumers/zoho.service.ts",
+    "erp": "NODE_NO_WARNINGS=1 tsx src/consumers/erp.service.ts",
     "dlq": "NODE_NO_WARNINGS=1 tsx src/consumers/dlq.inspector.ts",
     "seed": "NODE_NO_WARNINGS=1 tsx src/tools/seed.ts",
     "offsets": "NODE_NO_WARNINGS=1 tsx src/tools/offsets.ts",

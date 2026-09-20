@@ -3,7 +3,7 @@
 services:
   redpanda:
     image: redpandadata/redpanda:v24.2.9
-    container_name: flexipill-redpanda
+    container_name: orderstream-redpanda
     command:
       - redpanda start
       - --smp 1
@@ -25,7 +25,7 @@ services:
   # This is your microscope for every phase. http://localhost:8080
   console:
     image: redpandadata/console:v2.7.2
-    container_name: flexipill-console
+    container_name: orderstream-console
     depends_on:
       redpanda:
         condition: service_healthy
