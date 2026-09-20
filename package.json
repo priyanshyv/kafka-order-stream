@@ -1,0 +1,31 @@
+{
+  "name": "flexipill-stream",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Learning Kafka by rebuilding the flexipill-core order flow as a message stream",
+  "scripts": {
+    "topics": "NODE_NO_WARNINGS=1 tsx src/tools/topics.ts",
+    "api": "NODE_NO_WARNINGS=1 tsx src/producer/api.ts",
+    "email": "NODE_NO_WARNINGS=1 tsx src/consumers/email.service.ts",
+    "inventory": "NODE_NO_WARNINGS=1 tsx src/consumers/inventory.service.ts",
+    "analytics": "NODE_NO_WARNINGS=1 tsx src/consumers/analytics.service.ts",
+    "fraud": "NODE_NO_WARNINGS=1 tsx src/consumers/fraud.service.ts",
+    "zoho": "NODE_NO_WARNINGS=1 tsx src/consumers/zoho.service.ts",
+    "dlq": "NODE_NO_WARNINGS=1 tsx src/consumers/dlq.inspector.ts",
+    "seed": "NODE_NO_WARNINGS=1 tsx src/tools/seed.ts",
+    "offsets": "NODE_NO_WARNINGS=1 tsx src/tools/offsets.ts",
+    "reset": "NODE_NO_WARNINGS=1 tsx src/tools/reset.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "kafkajs": "^2.2.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

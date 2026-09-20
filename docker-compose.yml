@@ -1,0 +1,35 @@
+# Redpanda = Kafka wire-protocol compatible, single binary, no Zookeeper.
+# Everything in this repo talks plain Kafka, so you can swap in real Kafka later.
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.9
+    container_name: flexipill-redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --mode dev-container
+    ports:
+      - "9092:9092"   # Kafka API  <- your TS code connects here
+      - "9644:9644"   # admin API
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Web UI: browse topics, partitions, messages, consumer groups + their lag.
+  # This is your microscope for every phase. http://localhost:8080
+  console:
+    image: redpandadata/console:v2.7.2
+    container_name: flexipill-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:29092
