@@ -84,6 +84,11 @@ export async function runConsumer(name: string, opts: ConsumerOptions): Promise<
           }
           // Out of retries. Park it, commit past it, keep the partition moving.
           log.error(`giving up after ${maxAttempts} attempts -> ${TOPICS.dlq}: ${reason}`);
+          // Carry the replay counter forward. If this message only reached us
+          // BECAUSE someone replayed it from the DLQ, that history has to
+          // survive the second death - otherwise replaying into a consumer
+          // that is still broken loops forever.
+          const replayCount = raw.message.headers?.['x-replay-count']?.toString() ?? '0';
           await producer.send({
             topic: TOPICS.dlq,
             messages: [
@@ -96,6 +101,7 @@ export async function runConsumer(name: string, opts: ConsumerOptions): Promise<
                   'x-original-offset': raw.message.offset,
                   'x-failed-by': name,
                   'x-error': reason,
+                  'x-replay-count': replayCount,
                 },
               },
             ],
