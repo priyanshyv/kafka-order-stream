@@ -43,8 +43,15 @@ for (const g of groups.groups) {
     }
     for (const t of committed) {
       for (const p of t.partitions) {
-        if (p.offset === '-1') continue; // group never read this partition
+        // -1 = group never read this partition. -2 = an unresolved "earliest"
+        // sentinel, which means somebody stored a placeholder instead of a real
+        // position; flag it rather than doing arithmetic on it.
+        if (p.offset === '-1') continue;
         const high = ends.get(topic)?.get(p.partition) ?? '0';
+        if (p.offset === '-2') {
+          console.log(`    ${topic.padEnd(14)} p${p.partition}  committed=  (unset)  end=${String(high).padStart(4)}  <-- sentinel, will fall back to auto-offset-reset`);
+          continue;
+        }
         const lag = Number(high) - Number(p.offset);
         const bar = lag > 0 ? `  <-- ${lag} behind` : '  (caught up)';
         console.log(`    ${topic.padEnd(14)} p${p.partition}  committed=${String(p.offset).padStart(4)}  end=${String(high).padStart(4)}${bar}`);
